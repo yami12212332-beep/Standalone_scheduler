@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scheduler</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1c2230;--mute:#667085;--line:#e3e6ec;--accent:#2f5bea;--ok:#12805c;--bad:#c0392b;--warn:#b26a00}
+@media(prefers-color-scheme:dark){:root{--bg:#12151c;--card:#1a1f29;--ink:#e8ebf2;--mute:#94a0b4;--line:#2a3140;--accent:#7b9cff;--ok:#3ecf9a;--bad:#ff7b6b;--warn:#f0b04a}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1000px;margin:0 auto;padding:24px 16px 48px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+h1{font-size:22px;margin:0}h2{font-size:16px;margin:0 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 16px;margin-bottom:20px;overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mute);font-weight:500;font-size:13px}tr:last-child td{border-bottom:0}
+tr.sel{background:color-mix(in srgb,var(--accent) 8%,transparent)}
+code{font:13px ui-monospace,Menlo,monospace}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:6px;padding:4px 10px;cursor:pointer}
+button:hover{border-color:var(--accent)}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;padding:6px 14px}
+button.danger{color:var(--bad)}
+.st{font-weight:600}.success{color:var(--ok)}.failed,.timeout{color:var(--bad)}.running{color:var(--warn)}.off{color:var(--mute)}
+.empty{padding:20px 0;color:var(--mute)}
+.tabs{display:flex;gap:6px;margin-bottom:8px}.tabs button.on{background:var(--accent);border-color:var(--accent);color:#fff}pre.term{background:#0d1117;color:#d6deeb;border-radius:8px;padding:14px;overflow:auto;height:300px;margin:0 0 16px;font:13px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap}pre.term.err{color:#ff8b7e}
+dialog{border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink);padding:20px;width:min(420px,92vw)}
+dialog::backdrop{background:rgba(0,0,0,.4)}
+label{display:block;margin-bottom:12px;font-size:13px;color:var(--mute)}
+input,select{display:block;width:100%;margin-top:4px;padding:7px 9px;font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:6px}
+input[type=checkbox]{display:inline;width:auto;margin-right:6px}
+.row{display:flex;gap:10px}.row>*{flex:1}.actions{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Scheduled tasks</h1><button class="primary" onclick="openForm()">New task</button></header>
+
+  <div class="card"><table>
+    <thead><tr><th>Name</th><th>Script</th><th>Cron</th><th>Next run</th><th>Last run</th><th></th></tr></thead>
+    <tbody id="tasks"></tbody>
+  </table><div id="none" class="empty" hidden>No tasks yet. Choose “New task” to schedule a script.</div></div>
+
+  <div id="hist" hidden>
+    <h2 id="hist-title"></h2>
+    <div class="card"><table>
+      <thead><tr><th>Run</th><th>Status</th><th>Started</th><th>Duration</th><th>Exit</th><th></th></tr></thead>
+      <tbody id="runs"></tbody>
+    </table></div>
+    <h2>Terminal</h2>
+    <div class="tabs"><button data-t="output" class="on">Output</button><button data-t="error_log">Error log</button><button data-t="process_tree">Process tree</button><a id="dl" href="#" download style="margin-left:auto;align-self:center;font-size:13px;color:var(--accent)" hidden>Download full log</a></div>
+    <pre id="out" class="term">Select a run to see its output.</pre>
+  </div>
+</main>
+
+<dialog id="dlg"><form method="dialog" id="form" onsubmit="save(event)">
+  <h2 id="dlg-title">New task</h2>
+  <label>Name<input name="name" required></label>
+  <label>Script<select name="script" required></select></label>
+  <label>Arguments<input name="args" placeholder="--flag value"></label>
+  <div class="row">
+    <label>Cron (min hour day month weekday)<input name="cron" required placeholder="*/5 * * * *"></label>
+    <label>Timeout (sec)<input name="timeout_sec" type="number" min="1" max="86400" value="300"></label>
+  </div>
+  <label><input name="enabled" type="checkbox" checked>Enabled</label>
+  <div class="actions"><button type="button" onclick="dlg.close()">Cancel</button><button class="primary">Save task</button></div>
+</form></dialog>
+
+<script>
+const $ = id => document.getElementById(id);
+const dlg = $('dlg'), form = $('form');
+let tasks = [], lastRun = {}, selTask = null, selRun = null, editId = null, runsCache = [], tab = 'output';
+
+async function api(url, opt = {}) {
+  const r = await fetch('/api' + url, {headers: {'Content-Type': 'application/json'}, ...opt});
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    alert(typeof e.detail === 'string' ? e.detail : JSON.stringify(e.detail || r.statusText));
+    throw new Error('request failed');
+  }
+  return r.status === 204 ? null : r.json();
+}
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const utc = s => s ? new Date(/Z|[+-]\d\d:\d\d$/.test(s) ? s : s + 'Z') : null;
+const fmt = s => s ? utc(s).toLocaleString('en-IN', {timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'medium'}) + ' IST' : '—';
+const dur = r => r.finished_at ? ((utc(r.finished_at) - utc(r.started_at)) / 1000).toFixed(1) + 's' : '…';
+
+async function loadTasks() {
+  tasks = await api('/tasks');
+  await Promise.all(tasks.map(async t => { lastRun[t.id] = (await api(`/tasks/${t.id}/runs?limit=1`))[0]; }));
+  $('none').hidden = tasks.length > 0;
+  $('tasks').innerHTML = tasks.map(t => {
+    const r = lastRun[t.id];
+    return `<tr class="${t.id === selTask ? 'sel' : ''}">
+      <td><b>${esc(t.name)}</b>${t.enabled ? '' : ' <span class="off">(paused)</span>'}</td>
+      <td><code>${esc(t.script)} ${esc(t.args)}</code></td>
+      <td><code>${esc(t.cron)}</code></td>
+      <td>${t.enabled ? fmt(t.next_run) : '—'}</td>
+      <td>${r ? `<span class="st ${r.status}">${r.status}</span>` : '—'}</td>
+      <td>
+        <button onclick="trigger(${t.id})">Run now</button>
+        <button onclick="showRuns(${t.id})">History</button>
+        <button onclick="toggle(${t.id})">${t.enabled ? 'Pause' : 'Resume'}</button>
+        <button onclick="openForm(${t.id})">Edit</button>
+        <button class="danger" onclick="del(${t.id})">Delete</button>
+      </td></tr>`;
+  }).join('');
+}
+
+async function showRuns(id) {
+  selTask = id; selRun = null;
+  $('hist').hidden = false;
+  $('hist-title').textContent = 'History: ' + tasks.find(t => t.id === id).name;
+  $('out').textContent = 'Select a run to see its output.';
+  await loadRuns(); loadTasks();
+}
+async function loadRuns() {
+  if (!selTask) return;
+  const runs = await api(`/tasks/${selTask}/runs`);
+  $('runs').innerHTML = runs.length ? runs.map(r => `<tr>
+    <td>#${r.id}</td><td><span class="st ${r.status}">${r.status}</span></td>
+    <td>${fmt(r.started_at)}</td><td>${dur(r)}</td><td>${r.exit_code ?? '—'}</td>
+    <td><button onclick="showOut(${r.id})">View output</button></td></tr>`).join('')
+    : '<tr><td colspan="6" class="empty">No runs yet. Choose “Run now” to start one.</td></tr>';
+  runsCache = runs; renderTerm();
+}
+function renderTerm() {
+  const r = runsCache.find(x => x.id === selRun); if (!r) return;
+  const el = $('out'), stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+  el.textContent = r[tab] || (tab === 'process_tree' ? '(no process tree captured; kept only for failed or timed-out runs)' : '(empty)');
+  el.classList.toggle('err', tab === 'error_log');
+  const dl = $('dl'), st = {output: 'out', error_log: 'err'}[tab];
+  dl.hidden = !st; if (st) dl.href = `/api/runs/${r.id}/logs?stream=${st}`;
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.t === tab));
+  if (stick) el.scrollTop = el.scrollHeight;
+}
+document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; renderTerm(); });
+async function showOut(id) {
+  selRun = id; await loadRuns();
+  const r = runsCache.find(x => x.id === id);
+  tab = r && r.status !== 'success' && r.status !== 'running' && r.error_log ? 'error_log' : 'output';
+  renderTerm();
+}
+
+const trigger = async id => { await api(`/tasks/${id}/trigger`, {method: 'POST'}); setTimeout(() => { loadTasks(); loadRuns(); }, 800); };
+const toggle = async id => { await api(`/tasks/${id}/toggle`, {method: 'POST'}); loadTasks(); };
+async function del(id) {
+  if (!confirm('Delete this task and its schedule?')) return;
+  await api(`/tasks/${id}`, {method: 'DELETE'});
+  if (selTask === id) { selTask = null; $('hist').hidden = true; }
+  loadTasks();
+}
+
+async function openForm(id = null) {
+  editId = id;
+  const scripts = await api('/scripts');
+  form.script.innerHTML = scripts.map(s => `<option>${esc(s)}</option>`).join('');
+  const t = tasks.find(x => x.id === id);
+  $('dlg-title').textContent = t ? 'Edit task' : 'New task';
+  form.name.value = t?.name ?? ''; form.args.value = t?.args ?? '';
+  form.cron.value = t?.cron ?? ''; form.timeout_sec.value = t?.timeout_sec ?? 300;
+  form.enabled.checked = t?.enabled ?? true;
+  if (t) form.script.value = t.script;
+  dlg.showModal();
+}
+async function save(e) {
+  e.preventDefault();
+  const body = JSON.stringify({name: form.name.value, script: form.script.value, args: form.args.value,
+    cron: form.cron.value.trim(), timeout_sec: +form.timeout_sec.value, enabled: form.enabled.checked});
+  await api(editId ? `/tasks/${editId}` : '/tasks', {method: editId ? 'PUT' : 'POST', body});
+  dlg.close(); loadTasks();
+}
+
+loadTasks();
+setInterval(() => { loadTasks(); loadRuns(); }, 3000);
+</script>
+</body>
+</html>

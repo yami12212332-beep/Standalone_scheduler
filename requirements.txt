@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+apscheduler<4
+sqlmodel
+psycopg2-binary
+psutil
